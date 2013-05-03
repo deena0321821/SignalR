@@ -128,7 +128,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
                 Cursor cursor = _cursors[streamIndex];
 
                 // Try to find a local mapping for this payload
-                var enumerator = new CachedStreamEnumerator(store.GetEnumerator(cursor.Id, cursor.Timestamp.Value),
+                var enumerator = new CachedStreamEnumerator(store.GetEnumerator(cursor.Id, cursor.Timestamp.Value, Identity, EventKeys.Count > 1),
                                                             streamIndex);
 
                 enumerators.Add(enumerator);

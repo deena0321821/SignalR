@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using Microsoft.AspNet.SignalR.Infrastructure;
@@ -25,15 +26,27 @@ namespace Microsoft.AspNet.SignalR.Messaging
         private ulong _minMappingId;
         private ScaleoutMapping _maxMapping;
 
+        private readonly TraceSource _trace;
+        private readonly string _tracePrefix;
+
+        public ScaleoutStore(uint capacity)
+            : this(capacity, trace: null, tracePrefix: null)
+        {
+
+        }
+
         // Creates a message store with the specified capacity. The actual capacity will be *at least* the
         // specified value. That is, GetMessages may return more data than 'capacity'.
-        public ScaleoutStore(uint capacity)
+        public ScaleoutStore(uint capacity, TraceSource trace, string tracePrefix)
         {
             // set a minimum capacity
             if (capacity < 32)
             {
                 capacity = 32;
             }
+
+            _trace = trace;
+            _tracePrefix = tracePrefix;
 
             // Dynamically choose an appropriate number of fragments and the size of each fragment.
             // This is chosen to avoid allocations on the large object heap and to minimize contention
@@ -153,11 +166,11 @@ namespace Microsoft.AspNet.SignalR.Messaging
                             _minMessageId = (long)(existingFragment.MaxId + 1);
                             _minMappingId = existingFragment.MaxId;
                         }
-                        else if(idxIntoFragmentsArray == 0)
+                        else if (idxIntoFragmentsArray == 0)
                         {
                             _minMappingId = mapping.Id;
                         }
-                        
+
                         return true;
                     }
                 }
@@ -188,7 +201,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
             return false;
         }
 
-        public MessageStoreResult<ScaleoutMapping> GetMessages(ulong firstMessageIdRequestedByClient)
+        public MessageStoreResult<ScaleoutMapping> GetMessages(ulong firstMessageIdRequestedByClient, string connectionId, bool log)
         {
             ulong nextFreeMessageId = (ulong)Volatile.Read(ref _nextFreeMessageId);
 
@@ -220,6 +233,12 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
             // Case 3:
             // The client has missed messages, so we need to send him the earliest fragment we have.
+
+            if (log)
+            {
+                Trace("{0}: The client has missed messages, so we need to send him the earliest fragment we have.", connectionId);
+            }
+
             while (true)
             {
                 GetFragmentOffsets(nextFreeMessageId, out fragmentNum, out idxIntoFragmentsArray, out idxIntoFragment);
@@ -236,6 +255,16 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
         public MessageStoreResult<ScaleoutMapping> GetMessagesByMappingId(ulong mappingId, long timestamp)
         {
+            return GetMessagesByMappingId(mappingId, timestamp, connectionId: null, log: false);
+        }
+
+        public MessageStoreResult<ScaleoutMapping> GetMessagesByMappingId(ulong mappingId, long timestamp, string connectionId, bool log)
+        {
+            if (log)
+            {
+                Trace("{0}: GetMessagesByMappingId({1}, {2}) {3} {4}", connectionId, mappingId, timestamp, _minMappingId, _maxMapping == null ? 0 : _maxMapping.Id);
+            }
+
             var minMessageId = (ulong)Volatile.Read(ref _minMessageId);
             bool expiredMappingId = false;
 
@@ -250,10 +279,15 @@ namespace Microsoft.AspNet.SignalR.Messaging
                     idxIntoFragment++;
                     ulong firstMessageIdRequestedByClient = GetMessageId(thisFragment.FragmentNum, (uint)idxIntoFragment);
 
-                    return GetMessages(firstMessageIdRequestedByClient);
+                    return GetMessages(firstMessageIdRequestedByClient, connectionId, log);
                 }
                 else
                 {
+                    if (log)
+                    {
+                        Trace("{0}: TrySearch({1}) failed {2} {3}", connectionId, mappingId, thisFragment.MinValue, thisFragment.MaxValue);
+                    }
+
                     // We assume that if you fall between the range but we can't find a cursor
                     // then we've been reset
                     expiredMappingId = true;
@@ -264,12 +298,26 @@ namespace Microsoft.AspNet.SignalR.Messaging
             // min then get everything
             if (expiredMappingId || mappingId <= _minMappingId)
             {
+                if (log)
+                {
+                    Trace("{0}: expiredMappingId = {1} || Less than the min?: {2} <= {3} = {4}", connectionId, expiredMappingId, mappingId, _minMappingId, mappingId <= _minMappingId);
+
+                    Trace("{0}: GetAllMessages()", connectionId);
+                }
+
                 return GetAllMessages(minMessageId);
             }
 
             // We have a message id that is older than the max id we have so get all messages
             if (_maxMapping != null && _maxMapping.CreationTime.Ticks > timestamp)
             {
+                if (log)
+                {
+                    Trace("{0}: We have a message id that is older than the max id we have so get all messages. {1} > {2}", connectionId, _maxMapping.CreationTime.Ticks, timestamp);
+
+                    Trace("{0}: GetAllMessages()", connectionId);
+                }
+
                 return GetAllMessages(minMessageId);
             }
 
@@ -294,6 +342,14 @@ namespace Microsoft.AspNet.SignalR.Messaging
             var messages = new ArraySegment<ScaleoutMapping>(fragment.Data, 0, fragment.Length);
 
             return new MessageStoreResult<ScaleoutMapping>(firstMessageIdInThisFragment, messages, hasMoreData: true);
+        }
+
+        public void Trace(string value, params object[] args)
+        {
+            if (_trace != null)
+            {
+                _trace.TraceInformation(_tracePrefix + ": " + value, args);
+            }
         }
 
         internal bool TryGetFragmentFromMappingId(ulong mappingId, out Fragment fragment)
